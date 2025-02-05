@@ -1,13 +1,11 @@
-use common::{Message, ServerDetails, IP};
+use common::{ServerDetails,IP};
 use std::io::stdin;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-
 pub struct ClientManager {
     server_info: ServerDetails,
-    message: Message,
 }
 
 impl ClientManager {
@@ -18,22 +16,26 @@ impl ClientManager {
         };
         Self {
             server_info: sd,
-            message: Message::default(),
         }
     }
 
     pub async fn run(&self) {
-        let mut stream = TcpStream::connect("127.0.0.1:2098").await;
+        let address = format!(
+            "{}:{}",
+            self.server_info.ip_to_string().unwrap(),
+            self.server_info.port_to_string().unwrap()
+        );
+        let mut stream = TcpStream::connect(address).await;
         let mut buffer = [0u8; 1024];
 
         if let Ok(s) = &mut stream {
             println!("Connected to the server!");
             loop {
-                let mut received = String::from("");
-                match stdin().read_line(&mut received) {
+                let mut user_input = String::from("");
+                match stdin().read_line(&mut user_input) {
                     Ok(_) => {
-                        println!("{}", received);
-                        if let Ok(()) = s.write_all(received.as_bytes()).await {
+                        let send = user_input.trim_end().as_bytes();
+                        if let Ok(()) = s.write_all(send).await {
                             println!("Message sent !");
                         }
                     }
@@ -49,7 +51,7 @@ impl ClientManager {
                 }
             }
         } else {
-            println!("Couldn't connect !");
+            println!("Couldn't connect !");
         }
     }
 }
