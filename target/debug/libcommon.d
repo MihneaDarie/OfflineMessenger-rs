@@ -1,0 +1,1 @@
+C:\Users\dmihn\OfflineMessenger-rs\target\debug\libcommon.rlib: C:\Users\dmihn\OfflineMessenger-rs\common\src\lib.rs C:\Users\dmihn\OfflineMessenger-rs\common\src\message.rs C:\Users\dmihn\OfflineMessenger-rs\common\src\utils.rs
