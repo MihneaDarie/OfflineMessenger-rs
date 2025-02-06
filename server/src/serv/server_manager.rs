@@ -1,6 +1,9 @@
 use common::{Message, ServerDetails, IP};
 use rusqlite::{Connection, Result};
-use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -32,6 +35,8 @@ const DATA_BASE_SCRIPT: &str = "CREATE TABLE IF NOT EXISTS users (
 pub struct ServerManager {
     server_info: ServerDetails,
     max_clints: u8,
+    online_users: Arc<Mutex<Vec<(i32,u16,String)>>>,
+    unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<String>>>>,
     command_manager: Arc<Mutex<CommandManager>>,
     conn: Arc<Mutex<Connection>>,
 }
@@ -39,16 +44,24 @@ pub struct ServerManager {
 impl ServerManager {
     pub fn new(clients_number: u8, ip_address: IP, port: u16) -> Self {
         let c = Arc::new(Mutex::new(Connection::open("server.db").unwrap()));
-        c.lock().unwrap().execute(DATA_BASE_SCRIPT, ()).unwrap();
+        if let Ok(db) = c.lock() {
+            db.execute(DATA_BASE_SCRIPT, ()).unwrap();
+        }
         let sd = match ip_address {
             IP::V4(a, b, c, d) => ServerDetails::new_ipv4(a, b, c, d, port),
             IP::V6(a, b, c, d, e, f) => ServerDetails::new_ipv6(a, b, c, d, e, f, port),
         };
+        let ou = Arc::new(Mutex::new(Vec::new()));
+        let um = Arc::new(Mutex::new(HashMap::new()));
+        let cm = Arc::new(Mutex::new(CommandManager::new(c.clone(),ou.clone(),um.clone())));
+
         Self {
             server_info: sd,
             max_clints: clients_number,
             conn: c,
-            command_manager: Arc::new(Mutex::new(CommandManager::new())),
+            command_manager: cm,
+            online_users: ou,
+            unprocessed_messages: um,
         }
     }
 
@@ -64,8 +77,6 @@ impl ServerManager {
         loop {
             if let Ok((mut sock, addr)) = listener.accept().await {
                 println!("New client connected: {}", addr);
-
-                let conn = self.conn.clone();
                 let command_manager = self.command_manager.clone();
                 tokio::spawn(async move {
                     let mut buffer = [0u8; 1024];
@@ -84,18 +95,15 @@ impl ServerManager {
                         };
                         if let Ok(mes) = std::str::from_utf8(&buffer[..n]) {
                             if let Ok(m) = &mut command_manager.lock() {
-                                m.parse_command(mes);
+                                m.parse_command(mes,addr.port());
                                 m.identify_command();
                                 let answear = m.get_answear().as_bytes();
                                 len = answear.len();
                                 let mut ct = 0;
-                                print!("received from client<");
                                 for i in answear {
-                                    print!("{}",*i as char);
                                     buffer[ct] = *i;
                                     ct += 1;
                                 }
-                                println!(">");
                             }
                         } else {
                             println!("Couldn't ")
