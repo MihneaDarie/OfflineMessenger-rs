@@ -16,14 +16,14 @@ pub struct CommandManager {
 
     data_base: Arc<Mutex<Connection>>,
     online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
-    unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<String>>>>,
+    unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
 }
 
 impl CommandManager {
     pub fn new(
         data_base: Arc<Mutex<Connection>>,
         ou: Arc<Mutex<Vec<(i32, u16, String)>>>,
-        um: Arc<Mutex<HashMap<(i32, i32), Vec<String>>>>,
+        um: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
     ) -> Self {
         Self {
             command: String::default(),
@@ -39,6 +39,7 @@ impl CommandManager {
     pub fn parse_command(&mut self, input: &str, id: u16) {
         self.arguments.clear();
         self.command.clear();
+        self.answear.clear();
         self.user_id = id;
 
         let mut words = Vec::new();
@@ -129,6 +130,21 @@ impl CommandManager {
             return;
         }
 
+        if let Ok(list) = self.online_users.lock() {
+            let mut ind = -5;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = i.0 as i32;
+                }
+            }
+            if ind >= 0 {
+                let mes = "You are logged in !";
+                self.answear = String::from(mes);
+                println!("{mes}");
+                return;
+            }
+        }
+
         let username = self.arguments[0].clone();
         let password = self.arguments[1].clone();
 
@@ -180,6 +196,21 @@ impl CommandManager {
             println!("{mes}");
             self.answear = String::from(mes);
             return;
+        }
+
+        if let Ok(list) = self.online_users.lock() {
+            let mut ind = -5;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = i.0 as i32;
+                }
+            }
+            if ind < 0 {
+                let mes = "You are not logged in !";
+                self.answear = String::from(mes);
+                println!("{mes}");
+                return;
+            }
         }
 
         if let Ok(list) = &mut self.online_users.lock() {
@@ -248,7 +279,82 @@ impl CommandManager {
         self.answear = String::from(mes);
     }
     fn reply(&mut self) {
-        self.answear = "reply".to_string();
+        if self.arguments.len() != 2 {
+            let mes = "invalid syntax! Use: <reply> <\"message\"> <message_id>!";
+            println!("{}", mes);
+            self.answear = String::from(mes);
+            return;
+        }
+
+        if let Ok(list) = self.online_users.lock() {
+            let mut ind = -5;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = i.0 as i32;
+                }
+            }
+            if ind < 0 {
+                let mes = "Sign in first !";
+                self.answear = String::from(mes);
+                println!("{mes}");
+                return;
+            }
+        }
+
+        let message = self.arguments[0].clone();
+        let answeared_message_id_string = self.arguments[1].clone();
+
+        let answeared_id: i32 = match answeared_message_id_string.parse::<i32>() {
+            Ok(val) => val,
+            Err(_) => -5,
+        };
+        let mut sender = None;
+        if let Ok(list) = self.online_users.lock() {
+            for i in list.iter() {
+                if i.1 == self.user_id {
+                    sender = Some(i.0);
+                    break;
+                }
+            }
+        }
+        if let Some(sender_id) = sender {
+            let mut receiver = None;
+            if let Ok(conn) = self.data_base.lock() {
+                let mut stmt = conn
+                    .prepare("SELECT sender_id FROM message WHERE message_id = ?1;")
+                    .unwrap();
+                let mut rows = stmt
+                    .query_map([answeared_id], |row| row.get::<usize, i32>(0))
+                    .unwrap();
+
+                receiver = match rows.next() {
+                    Some(row) => match row {
+                        Ok(id) => Some(id),
+                        Err(_) => None,
+                    },
+                    None => None,
+                };
+            }
+            if let Some(receiver_id) = receiver {
+
+                if let Ok(m) = &mut self.unprocessed_messages.lock() {
+                    let index = (sender_id, receiver_id);
+                    m.entry(index)
+                        .or_insert_with(Vec::new)
+                        .push((message, Some(answeared_id)));
+                }
+                self.answear = "Reply sent!".to_string();
+            } else {
+                let mes = "Message you want to reply does not exist !";
+                println!("{mes}");
+                self.answear = String::from(mes);
+                return;
+            }
+        } else {
+            let mes = "You have to sign in !";
+            println!("{mes}");
+            self.answear = String::from(mes);
+        }
     }
     fn send(&mut self) {
         if self.arguments.len() != 2 {
@@ -257,6 +363,22 @@ impl CommandManager {
             self.answear = String::from(mes);
             return;
         }
+
+        if let Ok(list) = self.online_users.lock() {
+            let mut ind = -5;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = i.0 as i32;
+                }
+            }
+            if ind < 0 {
+                let mes = "Sign in first !";
+                self.answear = String::from(mes);
+                println!("{mes}");
+                return;
+            }
+        }
+
         let mut sender_id = -5;
         if let Ok(list) = self.online_users.lock() {
             for i in list.iter() {
@@ -289,7 +411,9 @@ impl CommandManager {
 
         if let Ok(m) = &mut self.unprocessed_messages.lock() {
             let index = (sender_id, receiver_id);
-            m.entry(index).or_insert_with(Vec::new).push(message);
+            m.entry(index)
+                .or_insert_with(Vec::new)
+                .push((message, None));
         }
         println!("Message sent !");
         self.answear = String::from("Message sent !");
@@ -305,6 +429,21 @@ impl CommandManager {
             return;
         }
 
+        if let Ok(list) = self.online_users.lock() {
+            let mut ind = -5;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = i.0 as i32;
+                }
+            }
+            if ind < 0 {
+                let mes = "Sign in first !";
+                self.answear = String::from(mes);
+                println!("{mes}");
+                return;
+            }
+        }
+
         let mut id = -5;
         if let Ok(list) = self.online_users.lock() {
             for i in list.iter() {
@@ -315,35 +454,55 @@ impl CommandManager {
             }
         }
         self.answear = String::from("Unread messages:\n");
-        if let (Ok(m), Ok(conn)) = (&mut self.unprocessed_messages.lock(), self.data_base.lock()) {
-            let mut rm = Vec::new();
-            for i in m.iter() {
-                if i.0 .1 == id {
-                    self.answear += "from ";
-                    self.answear += format!("{}", i.0 .0).as_str();
-                    self.answear.push('\n');
-
-                    for j in i.1 {
-                        self.answear += j.as_str();
-                        conn.execute("INSERT INTO message (sender_id, receiver_id, content) VALUES (?1,?2,?3)", (i.0.0,i.0.1,j.clone())).unwrap();
+        if let Ok(m) = &mut self.unprocessed_messages.lock() {
+            if let Ok(conn) = self.data_base.lock() {
+                let mut rm = Vec::new();
+                for i in m.iter() {
+                    if i.0 .1 == id {
+                        self.answear += "from ";
+                        self.answear += format!("{}", i.0 .0).as_str();
                         self.answear.push('\n');
-                    }
-                    rm.push(*i.0);
-                }
-            }
 
-            for i in &rm {
-                m.remove_entry(i);
+                        for j in i.1 {
+                            self.answear += j.0.as_str();
+                            if let Some(id) = j.1 {
+                                conn.execute("INSERT INTO message (sender_id, receiver_id, content, reply_to) VALUES (?1,?2,?3,?4)", (i.0.0,i.0.1,j.0.clone(),id)).unwrap();
+                            } else {
+                                conn.execute("INSERT INTO message (sender_id, receiver_id, content) VALUES (?1,?2,?3)", (i.0.0,i.0.1,j.0.clone())).unwrap();
+                            }
+                            self.answear.push('\n');
+                        }
+                        rm.push(*i.0);
+                    }
+                }
+
+                for i in &rm {
+                    m.remove_entry(i);
+                }
             }
         }
     }
-
     fn show_past_chat(&mut self) {
         if self.arguments.len() != 1 {
             let mes = "invalid syntax !<show_past_chat> <user> !";
             println!("{mes}");
             self.answear = String::from(mes);
             return;
+        }
+
+        if let Ok(list) = self.online_users.lock() {
+            let mut ind = -5;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = i.0 as i32;
+                }
+            }
+            if ind < 0 {
+                let mes = "Sign in first !";
+                self.answear = String::from(mes);
+                println!("{mes}");
+                return;
+            }
         }
 
         let username = self.arguments[0].clone();
@@ -374,20 +533,35 @@ impl CommandManager {
                 }
             }
 
-            self.answear = format!("{}'s chat:\n",username.as_str());
+            self.answear = format!("{}'s chat:\n", username.as_str());
 
-            let mut stmt = conn.prepare("SELECT content FROM message WHERE (sender_id =?1 AND receiver_id =?2) OR (sender_id = ?3 AND receiver_id = ?4);").unwrap();
-            let rows = stmt.query_map([sender_id,receiver_id,receiver_id,sender_id], |row| row.get::<usize,String>(0)).unwrap();
-    
+            let mut stmt = conn.prepare("SELECT message_id, content, reply_to FROM message WHERE (sender_id =?1 AND receiver_id =?2) OR (sender_id = ?3 AND receiver_id = ?4);").unwrap();
+            let rows = stmt
+                .query_map([sender_id, receiver_id, receiver_id, sender_id], |row| {
+                    let id = row.get::<usize, i64>(0).unwrap();
+                    let name = row.get::<usize, String>(1).unwrap();
+                    let reply_to = row.get::<usize, Option<i64>>(2).unwrap();
+                    Ok((id, name, reply_to))
+                })
+                .unwrap();
+
             for content in rows {
                 match content {
-                    Ok(s) => { self.answear += s.as_str(); self.answear.push('\n'); },
-                    Err(_) => {},
+                    Ok((id, s, reply_to)) => {
+                        self.answear += format!("Message-id({id}").as_str();
+                        if let Some(reply) = reply_to {
+                            self.answear += format!(" replied to {reply}): ").as_str();
+                        } else {
+                            self.answear += format!("): ").as_str();
+                        }
+                        self.answear += s.as_str();
+                        self.answear.push('\n');
+                    }
+                    Err(_) => {}
                 }
             }
         }
     }
-
     fn show_users(&mut self) {
         if self.arguments.len() != 0 {
             let mes = "invalid syntax !<show_users> !";
@@ -419,7 +593,6 @@ impl CommandManager {
             }
         }
     }
-
     pub fn get_answear(&self) -> &str {
         self.answear.as_str()
     }

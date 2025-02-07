@@ -35,7 +35,7 @@ pub struct ServerManager {
     server_info: ServerDetails,
     max_clints: u8,
     online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
-    unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<String>>>>,
+    unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<(String,Option<i32>)>>>>,
     command_manager: Arc<Mutex<CommandManager>>,
     conn: Arc<Mutex<Connection>>,
 }
