@@ -37,52 +37,51 @@ impl CommandManager {
     }
 
     pub fn parse_command(&mut self, input: &str, id: u16) {
-            self.arguments.clear();
-            self.command.clear();
-            self.user_id = id;
-        
-            let mut words = Vec::new();
-            let mut inside_quotes = false;
-            let mut current_arg = String::new();
-        
-            let chars: Vec<char> = input.chars().collect();
-            let mut i = 0;
-        
-            while i < chars.len() {
-                if chars[i] == '"' {
-                    inside_quotes = !inside_quotes;
-                    i += 1;
-                    continue;
-                }
-        
-                if chars[i].is_whitespace() && !inside_quotes {
-                    if !current_arg.is_empty() {
-                        words.push(current_arg.clone());
-                        current_arg.clear();
-                    }
-                } else {
-                    current_arg.push(chars[i]);
-                }
-        
+        self.arguments.clear();
+        self.command.clear();
+        self.user_id = id;
+
+        let mut words = Vec::new();
+        let mut inside_quotes = false;
+        let mut current_arg = String::new();
+
+        let chars: Vec<char> = input.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i] == '"' {
+                inside_quotes = !inside_quotes;
                 i += 1;
+                continue;
             }
-        
-            if !current_arg.is_empty() {
-                words.push(current_arg.clone());
+
+            if chars[i].is_whitespace() && !inside_quotes {
+                if !current_arg.is_empty() {
+                    words.push(current_arg.clone());
+                    current_arg.clear();
+                }
+            } else {
+                current_arg.push(chars[i]);
             }
-        
-            if inside_quotes {
-                let mes = "Didn't close string with \'\"\' !";
-                println!("{mes}");
-            }
-        
-            if words.is_empty() {
-                return;
-            }
-        
-            self.command = words[0].clone();
-            self.arguments = words[1..].to_vec();
-        
+
+            i += 1;
+        }
+
+        if !current_arg.is_empty() {
+            words.push(current_arg.clone());
+        }
+
+        if inside_quotes {
+            let mes = "Didn't close string with \'\"\' !";
+            println!("{mes}");
+        }
+
+        if words.is_empty() {
+            return;
+        }
+
+        self.command = words[0].clone();
+        self.arguments = words[1..].to_vec();
     }
     pub fn print(&self) {
         println!("{}", self.command);
@@ -108,7 +107,7 @@ impl CommandManager {
             "send" => {
                 self.send();
             }
-            "show_past_chat_with" => {
+            "show_past_chat" => {
                 self.show_past_chat();
             }
             "show_users" => {
@@ -316,7 +315,7 @@ impl CommandManager {
             }
         }
         self.answear = String::from("Unread messages:\n");
-        if let Ok(m) = &mut self.unprocessed_messages.lock() {
+        if let (Ok(m), Ok(conn)) = (&mut self.unprocessed_messages.lock(), self.data_base.lock()) {
             let mut rm = Vec::new();
             for i in m.iter() {
                 if i.0 .1 == id {
@@ -326,6 +325,7 @@ impl CommandManager {
 
                     for j in i.1 {
                         self.answear += j.as_str();
+                        conn.execute("INSERT INTO message (sender_id, receiver_id, content) VALUES (?1,?2,?3)", (i.0.0,i.0.1,j.clone())).unwrap();
                         self.answear.push('\n');
                     }
                     rm.push(*i.0);
@@ -338,10 +338,57 @@ impl CommandManager {
         }
     }
 
-    fn show_past_chat(&mut self) {}
+    fn show_past_chat(&mut self) {
+        if self.arguments.len() != 1 {
+            let mes = "invalid syntax !<show_past_chat> <user> !";
+            println!("{mes}");
+            self.answear = String::from(mes);
+            return;
+        }
+
+        let username = self.arguments[0].clone();
+
+        if let Ok(conn) = self.data_base.lock() {
+            let mut stmt = conn
+                .prepare("SELECT user_id FROM users WHERE username = ?1")
+                .unwrap();
+            let mut rows = stmt
+                .query_map([username.clone()], |row| row.get::<usize, i64>(0))
+                .unwrap();
+
+            let sender_id = match rows.next() {
+                Some(s) => match s {
+                    Ok(val) => val,
+                    Err(_) => -5,
+                },
+                None => -5,
+            };
+
+            let mut receiver_id = -5;
+            if let Ok(list) = self.online_users.lock() {
+                for i in list.iter() {
+                    if i.1 == self.user_id {
+                        receiver_id = i.0 as i64;
+                        break;
+                    }
+                }
+            }
+
+            self.answear = format!("{}'s chat:\n",username.as_str());
+
+            let mut stmt = conn.prepare("SELECT content FROM message WHERE (sender_id =?1 AND receiver_id =?2) OR (sender_id = ?3 AND receiver_id = ?4);").unwrap();
+            let rows = stmt.query_map([sender_id,receiver_id,receiver_id,sender_id], |row| row.get::<usize,String>(0)).unwrap();
+    
+            for content in rows {
+                match content {
+                    Ok(s) => { self.answear += s.as_str(); self.answear.push('\n'); },
+                    Err(_) => {},
+                }
+            }
+        }
+    }
 
     fn show_users(&mut self) {
-
         if self.arguments.len() != 0 {
             let mes = "invalid syntax !<show_users> !";
             println!("{mes}");

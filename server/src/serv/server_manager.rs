@@ -11,31 +11,30 @@ use tokio::{
 
 use super::command_manager::CommandManager;
 
-const DATA_BASE_SCRIPT: &str = "CREATE TABLE IF NOT EXISTS users (
+const DATA_BASE_SCRIPT_USERS: &str = "CREATE TABLE IF NOT EXISTS users (
                                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
                                 first_name TEXT NOT NULL,
                                 last_name TEXT NOT NULL,
                                 username TEXT NOT NULL,
                                 password TEXT NOT NULL
-                                );
-                                
-                                CREATE TABLE IF NOT EXISTS message (
+                                );";
+
+const DATA_BASE_SCRIPT_MESSAGE: &str = "CREATE TABLE IF NOT EXISTS message (
                                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
                                 sender_id INTEGER NOT NULL,
                                 receiver_id INTEGER NOT NULL,
                                 content TEXT NOT NULL,
                                 reply_to INTEGER,
-                                is_read BOOLEAN DEFAULT FALSE,
                                 time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                 FOREIGN KEY (sender_id) REFERENCES users(user_id),
-                                FOREIGN KEY (receiver_id) REFERENCES users(receiver_id),
+                                FOREIGN KEY (receiver_id) REFERENCES users(user_id),
                                 FOREIGN KEY (reply_to) REFERENCES message(message_id)
-                                )";
+                                );";
 
 pub struct ServerManager {
     server_info: ServerDetails,
     max_clints: u8,
-    online_users: Arc<Mutex<Vec<(i32,u16,String)>>>,
+    online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
     unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<String>>>>,
     command_manager: Arc<Mutex<CommandManager>>,
     conn: Arc<Mutex<Connection>>,
@@ -45,15 +44,21 @@ impl ServerManager {
     pub fn new(clients_number: u8, ip_address: IP, port: u16) -> Self {
         let c = Arc::new(Mutex::new(Connection::open("server.db").unwrap()));
         if let Ok(db) = c.lock() {
-            db.execute(DATA_BASE_SCRIPT, ()).unwrap();
+            db.execute(DATA_BASE_SCRIPT_USERS, ()).unwrap();
+            db.execute(DATA_BASE_SCRIPT_MESSAGE, ()).unwrap();
         }
+
         let sd = match ip_address {
             IP::V4(a, b, c, d) => ServerDetails::new_ipv4(a, b, c, d, port),
             IP::V6(a, b, c, d, e, f) => ServerDetails::new_ipv6(a, b, c, d, e, f, port),
         };
         let ou = Arc::new(Mutex::new(Vec::new()));
         let um = Arc::new(Mutex::new(HashMap::new()));
-        let cm = Arc::new(Mutex::new(CommandManager::new(c.clone(),ou.clone(),um.clone())));
+        let cm = Arc::new(Mutex::new(CommandManager::new(
+            c.clone(),
+            ou.clone(),
+            um.clone(),
+        )));
 
         Self {
             server_info: sd,
@@ -95,7 +100,7 @@ impl ServerManager {
                         };
                         if let Ok(mes) = std::str::from_utf8(&buffer[..n]) {
                             if let Ok(m) = &mut command_manager.lock() {
-                                m.parse_command(mes,addr.port());
+                                m.parse_command(mes, addr.port());
                                 m.identify_command();
                                 let answear = m.get_answear().as_bytes();
                                 len = answear.len();
