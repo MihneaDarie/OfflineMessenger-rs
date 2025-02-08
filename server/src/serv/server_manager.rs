@@ -9,7 +9,7 @@ use tokio::{
     net::TcpListener,
 };
 
-use super::command_manager::CommandManager;
+use super::{command_manager::CommandManager, Timer};
 
 const DATA_BASE_SCRIPT_USERS: &str = "CREATE TABLE IF NOT EXISTS users (
                                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +38,7 @@ pub struct ServerManager {
     unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
     communication_channels: Arc<Mutex<HashMap<u16,Sender<String>>>>,
     command_manager: Arc<Mutex<CommandManager>>,
+    timer: Timer,
     cvar: Arc<(Mutex<bool>,Condvar)>,
     conn: Arc<Mutex<Connection>>,
 }
@@ -61,16 +62,19 @@ impl ServerManager {
             ou.clone(),
             um.clone(),
         )));
-
+        let cc = Arc::new(Mutex::new(HashMap::new()));
+        let cv = Arc::new((Mutex::new(false),Condvar::new()));
+        let t = Timer::new(ou.clone(), um.clone(), cc.clone(), c.clone(),cv.clone());
         Self {
             server_info: sd,
             max_clints: clients_number,
             conn: c,
+            timer: t,
             command_manager: cm,
             online_users: ou,
             unprocessed_messages: um,
-            cvar: Arc::new((Mutex::new(false),Condvar::new())),
-            communication_channels: Arc::new(Mutex::new(HashMap::new())),
+            cvar: cv,
+            communication_channels: cc,
         }
     }
 
@@ -82,7 +86,7 @@ impl ServerManager {
         );
         let listener = TcpListener::bind(adress).await.unwrap();
         println!("Server listening !4");
-
+        let handle = self.timer.spawn();
         loop {
             if let Ok((sock, addr)) = listener.accept().await {
                 let (mut read, mut write) = split(sock);
@@ -136,11 +140,17 @@ impl ServerManager {
                         }
                         if let Err(e) = write.write_all(&buffer[..len]).await {
                             eprintln!("Failed to write to client {}: {}", addr, e);
-                            return;
                         }
                     }
                 });
             }
+            if let Ok(guard) = self.cvar.0.lock() {
+                if *guard {
+                    break;
+                }
+            }
         }
+        handle.join().unwrap();
+        println!("Server is down !");
     }
 }
