@@ -44,10 +44,14 @@ impl ClientManager {
                     }
                 }
                 if let Ok(n) = s.read(&mut buffer).await {
+                    let answear = String::from_utf8_lossy(&buffer[..n]);
                     println!(
                         "Received from server: {}",
-                        String::from_utf8_lossy(&buffer[..n])
+                        answear
                     );
+                    if answear == "exit!" {
+                        break;
+                    }
                 }
             }
         } else {

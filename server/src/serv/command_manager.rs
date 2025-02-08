@@ -1,12 +1,11 @@
 use std::{
-    clone,
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 use common::Message;
 use rusqlite::Connection;
-use tokio::task::spawn_blocking;
+use tokio::{io::WriteHalf, net::TcpStream, task::spawn_blocking};
 
 pub struct CommandManager {
     command: String,
@@ -91,7 +90,7 @@ impl CommandManager {
         }
         println!("");
     }
-    pub fn identify_command(&mut self) {
+    pub fn identify_command(&mut self, write: &WriteHalf<TcpStream>) {
         match self.command.as_str() {
             "sign_in" => {
                 self.sign_in();
@@ -117,6 +116,9 @@ impl CommandManager {
             "check_inbox" => {
                 self.check_inbox();
             }
+            "exit" => {
+                self.exit();
+            }
             _ => {
                 self.invalid();
             }
@@ -131,13 +133,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind >= 0 {
+            if ind.is_some() {
                 let mes = "You are logged in !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -199,13 +201,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind < 0 {
+            if ind.is_none() {
                 let mes = "You are not logged in !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -214,14 +216,14 @@ impl CommandManager {
         }
 
         if let Ok(list) = &mut self.online_users.lock() {
-            let mut ind: i32 = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind >= 0 {
-                list.swap_remove(ind as usize);
+            if ind.is_some() {
+                list.swap_remove(ind.unwrap() as usize);
             } else {
                 let mes = "User is not online !";
                 println!("{mes}");
@@ -287,13 +289,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind < 0 {
+            if ind.is_none() {
                 let mes = "Sign in first !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -304,10 +306,17 @@ impl CommandManager {
         let message = self.arguments[0].clone();
         let answeared_message_id_string = self.arguments[1].clone();
 
-        let answeared_id: i32 = match answeared_message_id_string.parse::<i32>() {
-            Ok(val) => val,
-            Err(_) => -5,
+        let answeared_id = match answeared_message_id_string.parse::<i32>() {
+            Ok(val) => Some(val),
+            Err(_) => None,
         };
+        if answeared_id.is_none() {
+            let mes = "Invalid number format for message id !";
+            println!("{mes}");
+            self.answear = String::from(mes);
+            return;
+        }
+
         let mut sender = None;
         if let Ok(list) = self.online_users.lock() {
             for i in list.iter() {
@@ -336,12 +345,11 @@ impl CommandManager {
                 };
             }
             if let Some(receiver_id) = receiver {
-
                 if let Ok(m) = &mut self.unprocessed_messages.lock() {
                     let index = (sender_id, receiver_id);
                     m.entry(index)
                         .or_insert_with(Vec::new)
-                        .push((message, Some(answeared_id)));
+                        .push((message, Some(answeared_id.unwrap())));
                 }
                 self.answear = "Reply sent!".to_string();
             } else {
@@ -365,13 +373,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind < 0 {
+            if ind.is_none() {
                 let mes = "Sign in first !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -379,15 +387,23 @@ impl CommandManager {
             }
         }
 
-        let mut sender_id = -5;
+        let mut sender_id = None;
         if let Ok(list) = self.online_users.lock() {
             for i in list.iter() {
                 if i.1 == self.user_id {
-                    sender_id = i.0;
+                    sender_id = Some(i.0);
                     break;
                 }
             }
         }
+
+        if sender_id.is_none() {
+            let mes = "User not online !";
+            self.answear = String::from(mes);
+            println!("{mes}");
+            return;
+        }
+
         let message = self.arguments[0].clone();
         let username = self.arguments[1].clone();
 
@@ -410,7 +426,7 @@ impl CommandManager {
         }
 
         if let Ok(m) = &mut self.unprocessed_messages.lock() {
-            let index = (sender_id, receiver_id);
+            let index = (sender_id.unwrap(), receiver_id);
             m.entry(index)
                 .or_insert_with(Vec::new)
                 .push((message, None));
@@ -430,13 +446,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind < 0 {
+            if ind.is_none() {
                 let mes = "Sign in first !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -444,21 +460,29 @@ impl CommandManager {
             }
         }
 
-        let mut id = -5;
+        let mut id = None;
         if let Ok(list) = self.online_users.lock() {
             for i in list.iter() {
                 if i.1 == self.user_id {
-                    id = i.0;
+                    id = Some(i.0);
                     break;
                 }
             }
         }
+
+        if id.is_none() {
+            let mes = "User not found !";
+            self.answear = String::from(mes);
+            println!("{mes}");
+            return;
+        }
+
         self.answear = String::from("Unread messages:\n");
         if let Ok(m) = &mut self.unprocessed_messages.lock() {
             if let Ok(conn) = self.data_base.lock() {
                 let mut rm = Vec::new();
                 for i in m.iter() {
-                    if i.0 .1 == id {
+                    if i.0 .1 == id.unwrap() {
                         self.answear += "from ";
                         self.answear += format!("{}", i.0 .0).as_str();
                         self.answear.push('\n');
@@ -491,13 +515,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind < 0 {
+            if ind.is_none() {
                 let mes = "Sign in first !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -571,13 +595,13 @@ impl CommandManager {
         }
 
         if let Ok(list) = self.online_users.lock() {
-            let mut ind = -5;
+            let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
-                    ind = i.0 as i32;
+                    ind = Some(i.0 as i32);
                 }
             }
-            if ind < 0 {
+            if ind.is_none() {
                 let mes = "Sign in first !";
                 self.answear = String::from(mes);
                 println!("{mes}");
@@ -593,6 +617,36 @@ impl CommandManager {
             }
         }
     }
+
+    fn exit(&mut self) {
+
+        if self.arguments.len() != 0 {
+            let mes = "This command shouldn't have arguments !";
+            println!("{mes}");
+            self.answear = String::from(mes);
+        }
+
+        if let Ok(list) = &mut self.online_users.lock() {
+            let mut ind = None;
+            for i in list.iter().enumerate() {
+                if i.1 .1 == self.user_id {
+                    ind = Some(i.0 as i32);
+                }
+            }
+            if ind.is_some() {
+                list.swap_remove(ind.unwrap() as usize);
+            } else {
+                let mes = "User is not online !";
+                println!("{mes}");
+                self.answear = String::from(mes);
+                return;
+            }
+        }
+        let mes = "exit!";
+        println!("{mes}");
+        self.answear = String::from(mes);
+    }
+
     pub fn get_answear(&self) -> &str {
         self.answear.as_str()
     }
