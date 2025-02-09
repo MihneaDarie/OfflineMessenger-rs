@@ -95,7 +95,7 @@ impl ServerManager {
         );
         let listener = TcpListener::bind(adress).await.unwrap();
         println!("Server listening !4");
-        //self.timer.spawn().await;
+        self.timer.spawn().await;
 
         loop {
             if let Ok((sock, addr)) = listener.accept().await {
@@ -114,51 +114,39 @@ impl ServerManager {
                 let command_manager = self.command_manager.clone();
                 tokio::spawn(async move {
                     let mut buffer = [0u8; 1024];
-                    let mut len = 0;
-                    let w = writer.clone();
                     loop {
-                        // if let Some(mes) = receiver.recv().await {
-                        //     let n = mes.len();
-                        //     let m = mes.as_bytes();
-                        //     w.lock().await.write_all(&m[..n]).await.unwrap();
-                        // } else {
-                        // }
-
-                        let n = match read.read(&mut buffer).await {
-                            Ok(n) if n == 0 => {
-                                println!("Client {} disconnected", addr);
-                                return;
-                            }
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("Failed to read from client {}: {}", addr, e);
-                                return;
-                            }
-                        };
-                        if let Ok(mes) = std::str::from_utf8(&buffer[..n]) {
-                            let m = &mut command_manager.lock().await;
-                            {
-                                m.parse_command(mes, addr.port());
-                                m.identify_command().await;
-                                let answear = m.get_answear().as_bytes();
-                                len = answear.len();
-                                let mut ct = 0;
-
-                                for i in answear {
-                                    buffer[ct] = *i;
-                                    ct += 1;
+                        tokio::select! {
+                            
+                            msg = receiver.recv() => {
+                                if let Some(msg) = msg {
+                                    writer.lock().await.write_all(msg.as_bytes()).await.unwrap();
+                                }
+                            },
+                            res = read.read(&mut buffer) => {
+                                match res {
+                                    Ok(n) if n == 0 => {
+                                        println!("Client {} disconnected", addr);
+                                        return;
+                                    },
+                                    Ok(n) => {
+                                        if let Ok(input) = std::str::from_utf8(&buffer[..n]) {
+                                            let mut cm = command_manager.lock().await;
+                                            cm.parse_command(input, addr.port());
+                                            cm.identify_command().await;
+                                            let resp = cm.get_answer();
+                                            writer.lock().await.write_all(resp.as_bytes()).await.unwrap();
+                                        }
+                                    },
+                                    Err(e) => {
+                                        eprintln!("Failed to read from client {}: {}", addr, e);
+                                        return;
+                                    }
                                 }
                             }
-                        } else {
-                            println!("Couldn't ")
-                        }
-                        if let Err(e) = writer.lock().await.write_all(&buffer[..len]).await {
-                            eprintln!("Failed to write to client {}: {}", addr, e);
                         }
                     }
-                })
-                .await
-                .unwrap();
+                });
+                
             }
             let guard = self.cvar.lock().await;
             {

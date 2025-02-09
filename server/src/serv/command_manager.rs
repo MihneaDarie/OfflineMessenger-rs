@@ -1,14 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
-use rusqlite::Connection;
 use tokio::sync::Mutex;
+use tokio_rusqlite::Connection;
 
 pub struct CommandManager {
     command: String,
     arguments: Vec<String>,
     user_id: u16,
-    answear: String,
-
+    answer: String,
     data_base: Arc<Mutex<Connection>>,
     online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
     unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
@@ -17,16 +16,16 @@ pub struct CommandManager {
 impl CommandManager {
     pub fn new(
         data_base: Arc<Mutex<Connection>>,
-        ou: Arc<Mutex<Vec<(i32, u16, String)>>>,
-        um: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
+        online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
+        unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
     ) -> Self {
         Self {
             command: String::default(),
             arguments: Vec::new(),
-            answear: String::default(),
+            answer: String::default(),
             data_base: data_base.clone(),
-            online_users: ou,
-            unprocessed_messages: um,
+            online_users,
+            unprocessed_messages,
             user_id: 0,
         }
     }
@@ -34,23 +33,19 @@ impl CommandManager {
     pub fn parse_command(&mut self, input: &str, id: u16) {
         self.arguments.clear();
         self.command.clear();
-        self.answear.clear();
+        self.answer.clear();
         self.user_id = id;
-
         let mut words = Vec::new();
         let mut inside_quotes = false;
         let mut current_arg = String::new();
-
         let chars: Vec<char> = input.chars().collect();
         let mut i = 0;
-
         while i < chars.len() {
             if chars[i] == '"' {
                 inside_quotes = !inside_quotes;
                 i += 1;
                 continue;
             }
-
             if chars[i].is_whitespace() && !inside_quotes {
                 if !current_arg.is_empty() {
                     words.push(current_arg.clone());
@@ -59,33 +54,26 @@ impl CommandManager {
             } else {
                 current_arg.push(chars[i]);
             }
-
             i += 1;
         }
-
         if !current_arg.is_empty() {
             words.push(current_arg.clone());
         }
-
-        if inside_quotes {
-            let mes = "Didn't close string with \'\"\' !";
-            println!("{mes}");
-        }
-
         if words.is_empty() {
             return;
         }
-
         self.command = words[0].clone();
         self.arguments = words[1..].to_vec();
     }
+
     pub fn print(&self) {
         println!("{}", self.command);
-        for i in self.arguments.iter() {
-            print!("{}|", i);
+        for arg in self.arguments.iter() {
+            print!("{}|", arg);
         }
-        println!("");
+        println!();
     }
+
     pub async fn identify_command(&mut self) {
         match self.command.as_str() {
             "sign_in" => {
@@ -120,547 +108,449 @@ impl CommandManager {
             }
         }
     }
+
     async fn sign_in(&mut self) {
         if self.arguments.len() != 2 {
-            let mes = "invalid syntax !<sign_in> <username> <password> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax !<sign_in> <username> <password> !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_some() {
-                let mes = "You are logged in !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "You are logged in !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
         let username = self.arguments[0].clone();
         let password = self.arguments[1].clone();
-
-        let conn = self.data_base.lock().await;
-        {
-            let mut stmt = conn
-                .prepare("SELECT user_id, password, username from users where username = ?1")
-                .unwrap();
-
-            let mut rows = stmt
-                .query_map([username.clone()], |row| {
-                    let id: i32 = row.get(0).unwrap();
-                    let pass: String = row.get(1).unwrap();
-                    let usr: String = row.get(2).unwrap();
+        let conn_clone = {
+            let db_guard = self.data_base.lock().await;
+            db_guard.clone()
+        };
+        let query_result: Result<(i32, String, String), _> = conn_clone
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT user_id, password, username FROM users WHERE username = ?1")
+                    .unwrap();
+                let mut rows = stmt
+                    .query_map([username.clone()], |row| {
+                        let id: i32 = row.get(0).unwrap();
+                        let pass: String = row.get(1).unwrap();
+                        let usr: String = row.get(2).unwrap();
+                        Ok((id, pass, usr))
+                    })
+                    .unwrap();
+                if let Some(Ok((id, pass, usr))) = rows.next() {
                     Ok((id, pass, usr))
-                })
-                .unwrap();
-
-            if let Some(result) = match rows.next() {
-                Some(Ok((id, pass, usr))) => Some((id, pass, usr)),
-                None => None,
-                Some(e) => {
-                    println!("Error at printing row: {:?} !", e);
-                    None
-                }
-            } {
-                if result.1 == password {
-                    let list = &mut self.online_users.lock().await;
-                    list.push((result.0, self.user_id, result.2));
-
-                    let mes = "Hello ";
-                    println!("{}", mes);
-                    self.answear = String::from(mes) + username.as_str();
-                    return;
                 } else {
-                    let mes = "Missmatched password !";
-                    println!("{}", mes);
-                    self.answear = String::from(mes);
-                    return;
+                    Ok((0, "Couldn't find user !".to_string(), "idk".to_string()))
                 }
+            })
+            .await;
+        match query_result {
+            Ok((id, pass, name)) if pass == password => {
+                {
+                    let mut users = self.online_users.lock().await;
+                    users.push((id, self.user_id, name));
+                }
+                self.answer = format!("Hello {}", self.arguments[0]);
+                println!("{}", self.answer);
             }
-            self.answear = String::from("Couldn't execute command");
-            println!("{}", self.answear);
+            Ok(_) => {
+                self.answer = "Mismatched password !".to_string();
+                println!("{}", self.answer);
+            }
+            Err(_) => {
+                self.answer = "Couldn't execute command".to_string();
+                println!("{}", self.answer);
+            }
         }
     }
+
     async fn sign_out(&mut self) {
         if self.arguments.len() != 0 {
-            let mes = "invalid syntax !<sign_out> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax !<sign_out> !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_none() {
-                let mes = "You are not logged in !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if !users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "You are not logged in !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
-        let list = &mut self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_some() {
-                list.swap_remove(ind.unwrap() as usize);
+            let mut users = self.online_users.lock().await;
+            if let Some(pos) = users
+                .iter()
+                .position(|(_, client, _)| *client == self.user_id)
+            {
+                users.swap_remove(pos);
             } else {
-                let mes = "User is not online !";
-                println!("{mes}");
-                self.answear = String::from(mes);
+                self.answer = "User is not online !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-        let mes = "Logged out !";
-        println!("{mes}");
-        self.answear = String::from(mes);
+        self.answer = "Logged out !".to_string();
+        println!("{}", self.answer);
     }
+
     async fn sign_up(&mut self) {
         if self.arguments.len() != 4 {
-            let mes = "invalid syntax !<sign_up> <first_name> <last_name> <username> <password> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer =
+                "invalid syntax !<sign_up> <first_name> <last_name> <username> <password> !"
+                    .to_string();
+            println!("{}", self.answer);
             return;
         }
-
         let first_name = self.arguments[0].clone();
         let last_name = self.arguments[1].clone();
         let username = self.arguments[2].clone();
         let password = self.arguments[3].clone();
-
         let db_conn = self.data_base.clone();
         let conn = db_conn.lock().await;
-        let mut stmt = conn
-            .prepare("SELECT user_id FROM users WHERE username = ?1")
-            .unwrap();
-        let mes;
-        let mut rows = stmt
-            .query_map([username.clone()], |row| row.get::<usize, i64>(0))
-            .unwrap();
-
-        let user_exists = match rows.next() {
-            Some(Ok(_)) => true,
-            None => false,
-            Some(Err(e)) => {
-                eprintln!("Error reading row: {e}");
-                false
+        let result = conn.call(move |conn| {
+            let mut stmt = conn.prepare("SELECT user_id FROM users WHERE username = ?1").unwrap();
+            let mut rows = stmt.query_map([username.clone()], |row| row.get::<usize, i64>(0)).unwrap();
+            let user_exists = match rows.next() {
+                Some(Ok(_)) => true,
+                None => false,
+                Some(Err(_)) => false,
+            };
+            if user_exists {
+                Ok("User already exists !".to_string())
+            } else {
+                conn.execute("INSERT INTO users (first_name,last_name,username,password) VALUES (?1,?2,?3,?4)", [first_name, last_name, username, password]).unwrap();
+                Ok("User created !".to_string())
             }
-        };
-        if user_exists {
-            mes = "User already exists !";
-        } else {
-            conn.execute(
-                "INSERT INTO users (first_name,last_name,username,password) VALUES (?1,?2,?3,?4)",
-                [first_name, last_name, username, password],
-            )
-            .unwrap();
-            mes = "User created !";
-            println!("{mes}");
+        }).await;
+        match result {
+            Ok(mes) => {
+                self.answer = mes;
+                println!("{}", self.answer);
+            }
+            Err(_) => {
+                self.answer = "Couldn't execute command !".to_string();
+                println!("{}", self.answer);
+            }
         }
-
-        self.answear = String::from(mes);
     }
+
     async fn reply(&mut self) {
         if self.arguments.len() != 2 {
-            let mes = "invalid syntax! Use: <reply> <\"message\"> <message_id>!";
-            println!("{}", mes);
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax! Use: <reply> <\"message\"> <message_id>!".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_none() {
-                let mes = "Sign in first !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if !users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "Sign in first !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
         let message = self.arguments[0].clone();
-        let answeared_message_id_string = self.arguments[1].clone();
-
-        let answeared_id = match answeared_message_id_string.parse::<i32>() {
-            Ok(val) => Some(val),
-            Err(_) => None,
-        };
-        if answeared_id.is_none() {
-            let mes = "Invalid number format for message id !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+        let answered_message_id_string = self.arguments[1].clone();
+        let answered_id = answered_message_id_string.parse::<i32>().ok();
+        if answered_id.is_none() {
+            self.answer = "Invalid number format for message id !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
         let mut sender = None;
-        let list = self.online_users.lock().await;
         {
-            for i in list.iter() {
-                if i.1 == self.user_id {
-                    sender = Some(i.0);
+            let users = self.online_users.lock().await;
+            for (id, client, _) in users.iter() {
+                if *client == self.user_id {
+                    sender = Some(*id);
                     break;
                 }
             }
         }
         if let Some(sender_id) = sender {
-            let mut receiver = None;
-            let conn = self.data_base.lock().await;
-            {
-                let mut stmt = conn
-                    .prepare("SELECT sender_id FROM message WHERE message_id = ?1;")
-                    .unwrap();
-                let mut rows = stmt
-                    .query_map([answeared_id], |row| row.get::<usize, i32>(0))
-                    .unwrap();
-
-                receiver = match rows.next() {
-                    Some(row) => match row {
-                        Ok(id) => Some(id),
-                        Err(_) => None,
-                    },
-                    None => None,
-                };
-            }
+            let db_conn = self.data_base.clone();
+            let conn = db_conn.lock().await;
+            let receiver: Option<i32> = conn
+                .call(move |conn| {
+                    let mut stmt = conn
+                        .prepare("SELECT sender_id FROM message WHERE message_id = ?1;")
+                        .unwrap();
+                    let mut rows = stmt
+                        .query_map([answered_id.unwrap()], |row| row.get::<usize, i32>(0))
+                        .unwrap();
+                    Ok(match rows.next() {
+                        Some(Ok(id)) => Some(id),
+                        _ => None,
+                    })
+                })
+                .await
+                .unwrap();
             if let Some(receiver_id) = receiver {
-                let m = &mut self.unprocessed_messages.lock().await;
-                {
-                    let index = (sender_id, receiver_id);
-                    m.entry(index)
-                        .or_insert_with(Vec::new)
-                        .push((message, Some(answeared_id.unwrap())));
-                }
-                self.answear = "Reply sent!".to_string();
+                let mut um_guard = self.unprocessed_messages.lock().await;
+                let index = (sender_id, receiver_id);
+                um_guard
+                    .entry(index)
+                    .or_insert_with(Vec::new)
+                    .push((message, answered_id));
+                self.answer = "Reply sent!".to_string();
+                println!("{}", self.answer);
             } else {
-                let mes = "Message you want to reply does not exist !";
-                println!("{mes}");
-                self.answear = String::from(mes);
+                self.answer = "Message you want to reply does not exist !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         } else {
-            let mes = "You have to sign in !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "You have to sign in !".to_string();
+            println!("{}", self.answer);
         }
     }
+
     async fn send(&mut self) {
         if self.arguments.len() != 2 {
-            let mes = "invalid syntax !<send> <\"message\"> <receiver> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax !<send> <\"message\"> <receiver> !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_none() {
-                let mes = "Sign in first !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if !users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "Sign in first !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
         let mut sender_id = None;
-        let list = self.online_users.lock().await;
         {
-            for i in list.iter() {
-                if i.1 == self.user_id {
-                    sender_id = Some(i.0);
+            let users = self.online_users.lock().await;
+            for (id, client, _) in users.iter() {
+                if *client == self.user_id {
+                    sender_id = Some(*id);
                     break;
                 }
             }
         }
-
         if sender_id.is_none() {
-            let mes = "User not online !";
-            self.answear = String::from(mes);
-            println!("{mes}");
+            self.answer = "User not online !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
         let message = self.arguments[0].clone();
         let username = self.arguments[1].clone();
-        let conn = self.data_base.lock().await;
-        let receiver_id = {
-            let mut stmt = conn
-                .prepare("SELECT user_id FROM users WHERE username = ?1;")
-                .unwrap();
-
-            stmt.query_row([username.clone()], |row| row.get::<usize, i32>(0))
-                .unwrap_or(-5)
-        };
-
+        let db_conn = self.data_base.clone();
+        let conn = db_conn.lock().await;
+        let receiver_id: i32 = conn
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT user_id FROM users WHERE username = ?1;")
+                    .unwrap();
+                let res = stmt
+                    .query_row([username.clone()], |row| row.get::<usize, i32>(0))
+                    .unwrap_or(-5);
+                Ok(res)
+            })
+            .await
+            .unwrap();
         if receiver_id == -5 {
-            let mes = "User does not exists !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "User does not exist !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let m = &mut self.unprocessed_messages.lock().await;
         {
+            let mut um_guard = self.unprocessed_messages.lock().await;
             let index = (sender_id.unwrap(), receiver_id);
-            m.entry(index)
+            um_guard
+                .entry(index)
                 .or_insert_with(Vec::new)
                 .push((message, None));
         }
-        println!("Message sent !");
-        self.answear = String::from("Message sent !");
+        self.answer = "Message sent !".to_string();
+        println!("{}", self.answer);
     }
+
     fn invalid(&mut self) {
-        self.answear = "invalid".to_string();
+        self.answer = "invalid".to_string();
     }
+
     async fn check_inbox(&mut self) {
         if self.arguments.len() != 0 {
-            let mes = "invalid syntax !<check_inbox> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax !<check_inbox> !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_none() {
-                let mes = "Sign in first !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if !users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "Sign in first !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
         let mut id = None;
-        let list = self.online_users.lock().await;
         {
-            for i in list.iter() {
-                if i.1 == self.user_id {
-                    id = Some(i.0);
+            let users = self.online_users.lock().await;
+            for (uid, client, _) in users.iter() {
+                if *client == self.user_id {
+                    id = Some(*uid);
                     break;
                 }
             }
         }
-
         if id.is_none() {
-            let mes = "User not found !";
-            self.answear = String::from(mes);
-            println!("{mes}");
+            self.answer = "User not found !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        self.answear = String::from("Unread messages:\n");
-        let m = &mut self.unprocessed_messages.lock().await;
-        {
-            let conn = self.data_base.lock().await;
-            {
-                let mut rm = Vec::new();
-                for i in m.iter() {
-                    if i.0 .1 == id.unwrap() {
-                        self.answear += "from ";
-                        self.answear += format!("{}", i.0 .0).as_str();
-                        self.answear.push('\n');
-
-                        for j in i.1 {
-                            self.answear += j.0.as_str();
-                            if let Some(id) = j.1 {
-                                conn.execute("INSERT INTO message (sender_id, receiver_id, content, reply_to) VALUES (?1,?2,?3,?4)", (i.0.0,i.0.1,j.0.clone(),id)).unwrap();
+        self.answer = "Unread messages:\n".to_string();
+        let db_conn = self.data_base.clone();
+        let conn = db_conn.lock().await;
+        let unprocessed = {
+            let mut guard = self.unprocessed_messages.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        let answer_str: String = conn.call(move |conn| {
+            let mut m = unprocessed;
+            let mut answer = String::new();
+            let mut rm = Vec::new();
+            for ((sender, receiver), messages) in m.iter() {
+                if let Some(user_id) = id {
+                    if *receiver == user_id {
+                        answer.push_str("from ");
+                        answer.push_str(&format!("{}", sender));
+                        answer.push('\n');
+                        for (content, rep) in messages.iter() {
+                            answer.push_str(content);
+                            answer.push('\n');
+                            if let Some(reply_id) = rep {
+                                conn.execute("INSERT INTO message (sender_id, receiver_id, content, reply_to) VALUES (?1, ?2, ?3, ?4)", (sender, receiver, content.clone(), reply_id)).unwrap();
                             } else {
-                                conn.execute("INSERT INTO message (sender_id, receiver_id, content) VALUES (?1,?2,?3)", (i.0.0,i.0.1,j.0.clone())).unwrap();
+                                conn.execute("INSERT INTO message (sender_id, receiver_id, content) VALUES (?1, ?2, ?3)", (sender, receiver, content.clone())).unwrap();
                             }
-                            self.answear.push('\n');
                         }
-                        rm.push(*i.0);
+                        rm.push((*sender, *receiver));
                     }
                 }
-
-                for i in &rm {
-                    m.remove_entry(i);
-                }
             }
-        }
+            for key in &rm {
+                m.remove_entry(key);
+            }
+            Ok(answer)
+        }).await.unwrap();
+        self.answer += &answer_str;
     }
+
     async fn show_past_chat(&mut self) {
         if self.arguments.len() != 1 {
-            let mes = "invalid syntax !<show_past_chat> <user> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax !<show_past_chat> <user> !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_none() {
-                let mes = "Sign in first !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if !users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "Sign in first !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
         let username = self.arguments[0].clone();
-
-        let conn = self.data_base.lock().await;
-        {
-            let mut stmt = conn
-                .prepare("SELECT user_id FROM users WHERE username = ?1")
-                .unwrap();
-            let mut rows = stmt
-                .query_map([username.clone()], |row| row.get::<usize, i64>(0))
-                .unwrap();
-
+        self.answer = format!("{}'s chat:\n", username);
+        let db_conn = self.data_base.clone();
+        let conn = db_conn.lock().await;
+        let users_copy = {
+            let mut guard = self.online_users.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        let user_id = self.user_id;
+        let chat: String = conn.call(move |conn| {
+            let mut answer = String::new();
+            let mut stmt = conn.prepare("SELECT user_id FROM users WHERE username = ?1").unwrap();
+            let mut rows = stmt.query_map([username.clone()], |row| row.get::<usize, i64>(0)).unwrap();
             let sender_id = match rows.next() {
-                Some(s) => match s {
-                    Ok(val) => val,
-                    Err(_) => -5,
-                },
-                None => -5,
+                Some(Ok(val)) => val,
+                _ => -5,
             };
-
             let mut receiver_id = -5;
-            let list = self.online_users.lock().await;
-            {
-                for i in list.iter() {
-                    if i.1 == self.user_id {
-                        receiver_id = i.0 as i64;
-                        break;
-                    }
+            for (uid, client, _) in users_copy.iter() {
+                if *client == user_id {
+                    receiver_id = *uid as i64;
+                    break;
                 }
             }
-
-            self.answear = format!("{}'s chat:\n", username.as_str());
-
-            let mut stmt = conn.prepare("SELECT message_id, content, reply_to FROM message WHERE (sender_id =?1 AND receiver_id =?2) OR (sender_id = ?3 AND receiver_id = ?4);").unwrap();
-            let rows = stmt
-                .query_map([sender_id, receiver_id, receiver_id, sender_id], |row| {
-                    let id = row.get::<usize, i64>(0).unwrap();
-                    let name = row.get::<usize, String>(1).unwrap();
-                    let reply_to = row.get::<usize, Option<i64>>(2).unwrap();
-                    Ok((id, name, reply_to))
-                })
-                .unwrap();
-
-            for content in rows {
-                match content {
-                    Ok((id, s, reply_to)) => {
-                        self.answear += format!("Message-id({id}").as_str();
-                        if let Some(reply) = reply_to {
-                            self.answear += format!(" replied to {reply}): ").as_str();
-                        } else {
-                            self.answear += format!("): ").as_str();
-                        }
-                        self.answear += s.as_str();
-                        self.answear.push('\n');
+            let mut stmt = conn.prepare("SELECT message_id, content, reply_to FROM message WHERE (sender_id = ?1 AND receiver_id = ?2) OR (sender_id = ?3 AND receiver_id = ?4)").unwrap();
+            let rows = stmt.query_map([sender_id, receiver_id, receiver_id, sender_id], |row| {
+                let id = row.get::<usize, i64>(0).unwrap();
+                let content = row.get::<usize, String>(1).unwrap();
+                let reply_to = row.get::<usize, Option<i64>>(2).unwrap();
+                Ok((id, content, reply_to))
+            }).unwrap();
+            for entry in rows {
+                if let Ok((id, content, reply_to)) = entry {
+                    answer += &format!("Message-id({}", id);
+                    if let Some(reply) = reply_to {
+                        answer += &format!(" replied to {}): ", reply);
+                    } else {
+                        answer += "): ";
                     }
-                    Err(_) => {}
+                    answer += &content;
+                    answer.push('\n');
                 }
             }
-        }
+            Ok(answer)
+        }).await.unwrap();
+        self.answer += &chat;
     }
+
     async fn show_users(&mut self) {
         if self.arguments.len() != 0 {
-            let mes = "invalid syntax !<show_users> !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "invalid syntax !<show_users> !".to_string();
+            println!("{}", self.answer);
             return;
         }
-
-        let list = self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_none() {
-                let mes = "Sign in first !";
-                self.answear = String::from(mes);
-                println!("{mes}");
+            let users = self.online_users.lock().await;
+            if !users.iter().any(|(_, client, _)| *client == self.user_id) {
+                self.answer = "Sign in first !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-
-        self.answear = String::from("Online users:\n");
-        let list = self.online_users.lock().await;
-        {
-            for i in list.iter() {
-                self.answear.push_str(i.2.as_str());
-                self.answear.push('\n');
-            }
+        self.answer = "Online users:\n".to_string();
+        let users = self.online_users.lock().await;
+        for (_, _, username) in users.iter() {
+            self.answer.push_str(username);
+            self.answer.push('\n');
         }
     }
 
     async fn exit(&mut self) {
         if self.arguments.len() != 0 {
-            let mes = "This command shouldn't have arguments !";
-            println!("{mes}");
-            self.answear = String::from(mes);
+            self.answer = "This command shouldn't have arguments !".to_string();
+            println!("{}", self.answer);
         }
-
-        let list = &mut self.online_users.lock().await;
         {
-            let mut ind = None;
-            for i in list.iter().enumerate() {
-                if i.1 .1 == self.user_id {
-                    ind = Some(i.0 as i32);
-                }
-            }
-            if ind.is_some() {
-                list.swap_remove(ind.unwrap() as usize);
+            let mut users = self.online_users.lock().await;
+            if let Some(pos) = users
+                .iter()
+                .position(|(_, client, _)| *client == self.user_id)
+            {
+                users.swap_remove(pos);
             } else {
-                let mes = "User is not online !";
-                println!("{mes}");
-                self.answear = String::from(mes);
+                self.answer = "User is not online !".to_string();
+                println!("{}", self.answer);
                 return;
             }
         }
-        let mes = "exit!";
-        println!("{mes}");
-        self.answear = String::from(mes);
+        self.answer = "exit!".to_string();
+        println!("{}", self.answer);
     }
 
-    pub fn get_answear(&self) -> &str {
-        self.answear.as_str()
+    pub fn get_answer(&self) -> &str {
+        self.answer.as_str()
     }
 }

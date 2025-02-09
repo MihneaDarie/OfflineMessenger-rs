@@ -6,7 +6,7 @@ use tokio::{
     time::sleep,
 };
 
-use rusqlite::Connection;
+use tokio_rusqlite::Connection;
 
 pub struct Timer {
     online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
@@ -22,18 +22,18 @@ impl Timer {
         um: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
         cc: Arc<Mutex<HashMap<u16, Sender<String>>>>,
         db: Arc<Mutex<Connection>>,
-        exit_flag: Arc<Mutex<bool>>,
+        exit: Arc<Mutex<bool>>,
     ) -> Self {
         Self {
             online_users: ou.clone(),
             unprocessed_messages: um.clone(),
             communication_channels: cc.clone(),
             data_base: db.clone(),
-            exit: exit_flag.clone(),
+            exit: exit.clone(),
         }
     }
 
-    pub async fn spawn(&self) -> JoinHandle<()> {
+    pub async fn spawn(&self) {
         let ou = self.online_users.clone();
         let um = self.unprocessed_messages.clone();
         let cc = self.communication_channels.clone();
@@ -53,58 +53,72 @@ impl Timer {
                 println!("Trying to send messages on a 5 sec interval!");
                 sleep(Duration::from_secs(5)).await;
 
-                let (users, mut messages, channels, conn) = (
-                    ou.lock().await,
-                    um.lock().await,
-                    cc.lock().await,
-                    db.lock().await,
-                );
-                {
-                    let mut rm = Vec::new();
-                    for ((sender, receiver), values) in messages.iter() {
-                        if let Some(client_id) = users
-                            .iter()
-                            .find(|(user_id, _, _)| user_id == sender)
-                            .map(|(_, client, _)| *client)
-                        {
-                            if let Some(send) = channels.get(&client_id) {
-                                let mut mes = format!("Message from {}:\n", sender);
-                                for (content, rep) in values.iter() {
-                                    if let Some(reply_to) = rep {
-                                        mes += &format!("replied to {}: ", reply_to);
-                                        mes += content;
-                                        mes.push('\n');
-                                        conn.execute(
-                                            "INSERT INTO message (sender_id, receiver_id, content, reply_to) VALUES (?1,?2,?3,?4)",
-                                            (sender, receiver, content.clone(), reply_to),
-                                        ).unwrap();
-                                    } else {
-                                        mes += content;
-                                        conn.execute(
-                                            "INSERT INTO message (sender_id, receiver_id, content) VALUES (?1,?2,?3)",
-                                            (sender, receiver, content.clone()),
-                                        ).unwrap();
-                                        mes.push('\n');
-                                    }
-                                    rm.push((*sender, *receiver));
-                                }
-                                if let Err(e) = send.send(mes).await {
-                                    println!("Couldn't send message: {:?}", e);
-                                } else {
-                                    println!("Messages sent!");
-                                }
+                let users = ou.lock().await;
+                let mut messages = um.lock().await;
+                let channels = cc.lock().await;
+
+                let mut rm = Vec::new();
+
+                for ((sender, receiver), values) in messages.iter() {
+                    if let Some(client_id) = users
+                        .iter()
+                        .find(|(user_id, _, _)| user_id == sender)
+                        .map(|(_, client, _)| *client)
+                    {
+                        if let Some(send) = channels.get(&client_id) {
+                            let mut mes = format!("Message from {}:\n", sender);
+                            for (content, rep) in values.iter() {
+                                let conn = db.lock().await;
+                                let mes_cloned = mes.clone();
+                                let sender_val = *sender;
+                                let receiver_val = *receiver;
+                                let content_owned = content.clone();
+                                let rep_copied = rep.clone();
+                                
+                                let new_mes: String = conn
+                                    .call(move |conn| {
+                                        let mut mes = mes_cloned;
+                                        if let Some(reply_to) = rep_copied {
+                                            mes += &format!("replied to {}: ", reply_to);
+                                            mes += &content_owned;
+                                            mes.push('\n');
+                                            conn.execute(
+                                                "INSERT INTO message (sender_id, receiver_id, content, reply_to) VALUES (?1, ?2, ?3, ?4)",
+                                                (sender_val, receiver_val, content_owned.clone(), reply_to),
+                                            )
+                                            .unwrap();
+                                        } else {
+                                            mes += &content_owned;
+                                            conn.execute(
+                                                "INSERT INTO message (sender_id, receiver_id, content) VALUES (?1, ?2, ?3)",
+                                                (sender_val, receiver_val, content_owned.clone()),
+                                            )
+                                            .unwrap();
+                                            mes.push('\n');
+                                        }
+                                        Ok(mes)
+                                    })
+                                    .await
+                                    .unwrap();
+                                mes = new_mes;
+                                rm.push((sender_val, receiver_val));
+                            }
+                            if let Err(e) = send.send(mes.clone()).await {
+                                println!("Couldn't send message: {:?}", e);
                             } else {
-                                println!("Couldn't extract communication channel!");
+                                println!("Messages sent!!!!!!!!!!");
                             }
                         } else {
-                            println!("Couldn't find receiver id!");
+                            println!("Couldn't extract communication channel!");
                         }
-                    }
-                    for index in rm {
-                        messages.remove(&index);
+                    } else {
+                        println!("Couldn't find receiver id!");
                     }
                 }
+                for index in rm {
+                    messages.remove(&index);
+                }
             }
-        })
+        });
     }
 }
