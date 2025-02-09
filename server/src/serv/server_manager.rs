@@ -1,13 +1,15 @@
-use common::{ ServerDetails, IP};
-use rusqlite::Connection;
-use std::{
-    collections::HashMap,
-    sync::{mpsc::{ channel, Sender}, Arc, Condvar, Mutex},
-};
+use common::{ServerDetails, IP};
+use std::{collections::HashMap, sync::Arc};
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::{
+        mpsc::{channel, Sender},
+        Mutex,
+    },
+    task::spawn_local,
 };
+use tokio_rusqlite::Connection;
 
 use super::{command_manager::CommandManager, Timer};
 
@@ -36,19 +38,26 @@ pub struct ServerManager {
     max_clints: u8,
     online_users: Arc<Mutex<Vec<(i32, u16, String)>>>,
     unprocessed_messages: Arc<Mutex<HashMap<(i32, i32), Vec<(String, Option<i32>)>>>>,
-    communication_channels: Arc<Mutex<HashMap<u16,Sender<String>>>>,
+    communication_channels: Arc<Mutex<HashMap<u16, Sender<String>>>>,
     command_manager: Arc<Mutex<CommandManager>>,
     timer: Timer,
-    cvar: Arc<(Mutex<bool>,Condvar)>,
+    cvar: Arc<Mutex<bool>>,
     conn: Arc<Mutex<Connection>>,
 }
 
 impl ServerManager {
-    pub fn new(clients_number: u8, ip_address: IP, port: u16) -> Self {
-        let c = Arc::new(Mutex::new(Connection::open("server.db").unwrap()));
-        if let Ok(db) = c.lock() {
-            db.execute(DATA_BASE_SCRIPT_USERS, ()).unwrap();
-            db.execute(DATA_BASE_SCRIPT_MESSAGE, ()).unwrap();
+    pub async fn new(clients_number: u8, ip_address: IP, port: u16) -> Self {
+        let c = Arc::new(Mutex::new(Connection::open("server.db").await.unwrap()));
+        {
+            let db = c.lock().await;
+
+            db.call(|conn| {
+                conn.execute(DATA_BASE_SCRIPT_USERS, []).unwrap();
+                conn.execute(DATA_BASE_SCRIPT_MESSAGE, []).unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
         }
 
         let sd = match ip_address {
@@ -63,8 +72,8 @@ impl ServerManager {
             um.clone(),
         )));
         let cc = Arc::new(Mutex::new(HashMap::new()));
-        let cv = Arc::new((Mutex::new(false),Condvar::new()));
-        let t = Timer::new(ou.clone(), um.clone(), cc.clone(), c.clone(),cv.clone());
+        let cv = Arc::new(Mutex::new(false));
+        let t = Timer::new(ou.clone(), um.clone(), cc.clone(), c.clone(), cv.clone()).await;
         Self {
             server_info: sd,
             max_clints: clients_number,
@@ -86,16 +95,19 @@ impl ServerManager {
         );
         let listener = TcpListener::bind(adress).await.unwrap();
         println!("Server listening !4");
-        let handle = self.timer.spawn();
+        //self.timer.spawn().await;
+
         loop {
             if let Ok((sock, addr)) = listener.accept().await {
-                let (mut read, mut write) = split(sock);
+                let (mut read, write) = split(sock);
                 println!("New client connected: {}", addr.port());
+                let writer = Arc::new(tokio::sync::Mutex::new(write));
 
-                //we create a channel for each client so it can receive specific messages from the server and insert it 
+                //we create a channel for each client so it can receive specific messages from the server and insert it
                 //in the map
-                let (producer,receiver) = channel::<String>();
-                if let Ok(comm) = &mut self.communication_channels.lock() {
+                let (producer, mut receiver) = channel::<String>(500);
+                let comm = &mut self.communication_channels.lock().await;
+                {
                     comm.insert(addr.port(), producer);
                 }
 
@@ -103,13 +115,14 @@ impl ServerManager {
                 tokio::spawn(async move {
                     let mut buffer = [0u8; 1024];
                     let mut len = 0;
+                    let w = writer.clone();
                     loop {
-
-                        if let Ok(mes) = receiver.try_recv() {
-                            let n = mes.len();
-                            let m  = mes.as_bytes();
-                            write.write_all(&m[..n]).await.unwrap();
-                        }
+                        // if let Some(mes) = receiver.recv().await {
+                        //     let n = mes.len();
+                        //     let m = mes.as_bytes();
+                        //     w.lock().await.write_all(&m[..n]).await.unwrap();
+                        // } else {
+                        // }
 
                         let n = match read.read(&mut buffer).await {
                             Ok(n) if n == 0 => {
@@ -123,13 +136,14 @@ impl ServerManager {
                             }
                         };
                         if let Ok(mes) = std::str::from_utf8(&buffer[..n]) {
-                            if let Ok(m) = &mut command_manager.lock() {
+                            let m = &mut command_manager.lock().await;
+                            {
                                 m.parse_command(mes, addr.port());
-                                m.identify_command(&write);
+                                m.identify_command().await;
                                 let answear = m.get_answear().as_bytes();
                                 len = answear.len();
                                 let mut ct = 0;
-                                
+
                                 for i in answear {
                                     buffer[ct] = *i;
                                     ct += 1;
@@ -138,19 +152,21 @@ impl ServerManager {
                         } else {
                             println!("Couldn't ")
                         }
-                        if let Err(e) = write.write_all(&buffer[..len]).await {
+                        if let Err(e) = writer.lock().await.write_all(&buffer[..len]).await {
                             eprintln!("Failed to write to client {}: {}", addr, e);
                         }
                     }
-                });
+                })
+                .await
+                .unwrap();
             }
-            if let Ok(guard) = self.cvar.0.lock() {
+            let guard = self.cvar.lock().await;
+            {
                 if *guard {
                     break;
                 }
             }
         }
-        handle.join().unwrap();
         println!("Server is down !");
     }
 }

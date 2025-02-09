@@ -1,11 +1,7 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 
-use common::Message;
 use rusqlite::Connection;
-use tokio::{io::WriteHalf, net::TcpStream, task::spawn_blocking};
+use tokio::sync::Mutex;
 
 pub struct CommandManager {
     command: String,
@@ -90,41 +86,41 @@ impl CommandManager {
         }
         println!("");
     }
-    pub fn identify_command(&mut self, write: &WriteHalf<TcpStream>) {
+    pub async fn identify_command(&mut self) {
         match self.command.as_str() {
             "sign_in" => {
-                self.sign_in();
+                self.sign_in().await;
             }
             "sign_up" => {
-                self.sign_up();
+                self.sign_up().await;
             }
             "sign_out" => {
-                self.sign_out();
+                self.sign_out().await;
             }
             "reply" => {
-                self.reply();
+                self.reply().await;
             }
             "send" => {
-                self.send();
+                self.send().await;
             }
             "show_past_chat" => {
-                self.show_past_chat();
+                self.show_past_chat().await;
             }
             "show_users" => {
-                self.show_users();
+                self.show_users().await;
             }
             "check_inbox" => {
-                self.check_inbox();
+                self.check_inbox().await;
             }
             "exit" => {
-                self.exit();
+                self.exit().await;
             }
             _ => {
                 self.invalid();
             }
         }
     }
-    fn sign_in(&mut self) {
+    async fn sign_in(&mut self) {
         if self.arguments.len() != 2 {
             let mes = "invalid syntax !<sign_in> <username> <password> !";
             println!("{mes}");
@@ -132,7 +128,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -150,7 +147,8 @@ impl CommandManager {
         let username = self.arguments[0].clone();
         let password = self.arguments[1].clone();
 
-        if let Ok(conn) = self.data_base.lock() {
+        let conn = self.data_base.lock().await;
+        {
             let mut stmt = conn
                 .prepare("SELECT user_id, password, username from users where username = ?1")
                 .unwrap();
@@ -173,9 +171,8 @@ impl CommandManager {
                 }
             } {
                 if result.1 == password {
-                    if let Ok(list) = &mut self.online_users.lock() {
-                        list.push((result.0, self.user_id, result.2));
-                    }
+                    let list = &mut self.online_users.lock().await;
+                    list.push((result.0, self.user_id, result.2));
 
                     let mes = "Hello ";
                     println!("{}", mes);
@@ -192,7 +189,7 @@ impl CommandManager {
             println!("{}", self.answear);
         }
     }
-    fn sign_out(&mut self) {
+    async fn sign_out(&mut self) {
         if self.arguments.len() != 0 {
             let mes = "invalid syntax !<sign_out> !";
             println!("{mes}");
@@ -200,7 +197,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -215,7 +213,8 @@ impl CommandManager {
             }
         }
 
-        if let Ok(list) = &mut self.online_users.lock() {
+        let list = &mut self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -235,7 +234,7 @@ impl CommandManager {
         println!("{mes}");
         self.answear = String::from(mes);
     }
-    fn sign_up(&mut self) {
+    async fn sign_up(&mut self) {
         if self.arguments.len() != 4 {
             let mes = "invalid syntax !<sign_up> <first_name> <last_name> <username> <password> !";
             println!("{mes}");
@@ -249,7 +248,7 @@ impl CommandManager {
         let password = self.arguments[3].clone();
 
         let db_conn = self.data_base.clone();
-        let conn = db_conn.lock().unwrap();
+        let conn = db_conn.lock().await;
         let mut stmt = conn
             .prepare("SELECT user_id FROM users WHERE username = ?1")
             .unwrap();
@@ -280,7 +279,7 @@ impl CommandManager {
 
         self.answear = String::from(mes);
     }
-    fn reply(&mut self) {
+    async fn reply(&mut self) {
         if self.arguments.len() != 2 {
             let mes = "invalid syntax! Use: <reply> <\"message\"> <message_id>!";
             println!("{}", mes);
@@ -288,7 +287,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -318,7 +318,8 @@ impl CommandManager {
         }
 
         let mut sender = None;
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             for i in list.iter() {
                 if i.1 == self.user_id {
                     sender = Some(i.0);
@@ -328,7 +329,8 @@ impl CommandManager {
         }
         if let Some(sender_id) = sender {
             let mut receiver = None;
-            if let Ok(conn) = self.data_base.lock() {
+            let conn = self.data_base.lock().await;
+            {
                 let mut stmt = conn
                     .prepare("SELECT sender_id FROM message WHERE message_id = ?1;")
                     .unwrap();
@@ -345,7 +347,8 @@ impl CommandManager {
                 };
             }
             if let Some(receiver_id) = receiver {
-                if let Ok(m) = &mut self.unprocessed_messages.lock() {
+                let m = &mut self.unprocessed_messages.lock().await;
+                {
                     let index = (sender_id, receiver_id);
                     m.entry(index)
                         .or_insert_with(Vec::new)
@@ -364,7 +367,7 @@ impl CommandManager {
             self.answear = String::from(mes);
         }
     }
-    fn send(&mut self) {
+    async fn send(&mut self) {
         if self.arguments.len() != 2 {
             let mes = "invalid syntax !<send> <\"message\"> <receiver> !";
             println!("{mes}");
@@ -372,7 +375,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -388,7 +392,8 @@ impl CommandManager {
         }
 
         let mut sender_id = None;
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             for i in list.iter() {
                 if i.1 == self.user_id {
                     sender_id = Some(i.0);
@@ -406,16 +411,14 @@ impl CommandManager {
 
         let message = self.arguments[0].clone();
         let username = self.arguments[1].clone();
-
-        let receiver_id = if let Ok(conn) = self.data_base.lock() {
+        let conn = self.data_base.lock().await;
+        let receiver_id = {
             let mut stmt = conn
                 .prepare("SELECT user_id FROM users WHERE username = ?1;")
                 .unwrap();
 
             stmt.query_row([username.clone()], |row| row.get::<usize, i32>(0))
                 .unwrap_or(-5)
-        } else {
-            -5
         };
 
         if receiver_id == -5 {
@@ -425,7 +428,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(m) = &mut self.unprocessed_messages.lock() {
+        let m = &mut self.unprocessed_messages.lock().await;
+        {
             let index = (sender_id.unwrap(), receiver_id);
             m.entry(index)
                 .or_insert_with(Vec::new)
@@ -437,7 +441,7 @@ impl CommandManager {
     fn invalid(&mut self) {
         self.answear = "invalid".to_string();
     }
-    fn check_inbox(&mut self) {
+    async fn check_inbox(&mut self) {
         if self.arguments.len() != 0 {
             let mes = "invalid syntax !<check_inbox> !";
             println!("{mes}");
@@ -445,7 +449,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -461,7 +466,8 @@ impl CommandManager {
         }
 
         let mut id = None;
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             for i in list.iter() {
                 if i.1 == self.user_id {
                     id = Some(i.0);
@@ -478,8 +484,10 @@ impl CommandManager {
         }
 
         self.answear = String::from("Unread messages:\n");
-        if let Ok(m) = &mut self.unprocessed_messages.lock() {
-            if let Ok(conn) = self.data_base.lock() {
+        let m = &mut self.unprocessed_messages.lock().await;
+        {
+            let conn = self.data_base.lock().await;
+            {
                 let mut rm = Vec::new();
                 for i in m.iter() {
                     if i.0 .1 == id.unwrap() {
@@ -506,7 +514,7 @@ impl CommandManager {
             }
         }
     }
-    fn show_past_chat(&mut self) {
+    async fn show_past_chat(&mut self) {
         if self.arguments.len() != 1 {
             let mes = "invalid syntax !<show_past_chat> <user> !";
             println!("{mes}");
@@ -514,7 +522,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -531,7 +540,8 @@ impl CommandManager {
 
         let username = self.arguments[0].clone();
 
-        if let Ok(conn) = self.data_base.lock() {
+        let conn = self.data_base.lock().await;
+        {
             let mut stmt = conn
                 .prepare("SELECT user_id FROM users WHERE username = ?1")
                 .unwrap();
@@ -548,7 +558,8 @@ impl CommandManager {
             };
 
             let mut receiver_id = -5;
-            if let Ok(list) = self.online_users.lock() {
+            let list = self.online_users.lock().await;
+            {
                 for i in list.iter() {
                     if i.1 == self.user_id {
                         receiver_id = i.0 as i64;
@@ -586,7 +597,7 @@ impl CommandManager {
             }
         }
     }
-    fn show_users(&mut self) {
+    async fn show_users(&mut self) {
         if self.arguments.len() != 0 {
             let mes = "invalid syntax !<show_users> !";
             println!("{mes}");
@@ -594,7 +605,8 @@ impl CommandManager {
             return;
         }
 
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
@@ -610,7 +622,8 @@ impl CommandManager {
         }
 
         self.answear = String::from("Online users:\n");
-        if let Ok(list) = self.online_users.lock() {
+        let list = self.online_users.lock().await;
+        {
             for i in list.iter() {
                 self.answear.push_str(i.2.as_str());
                 self.answear.push('\n');
@@ -618,15 +631,15 @@ impl CommandManager {
         }
     }
 
-    fn exit(&mut self) {
-
+    async fn exit(&mut self) {
         if self.arguments.len() != 0 {
             let mes = "This command shouldn't have arguments !";
             println!("{mes}");
             self.answear = String::from(mes);
         }
 
-        if let Ok(list) = &mut self.online_users.lock() {
+        let list = &mut self.online_users.lock().await;
+        {
             let mut ind = None;
             for i in list.iter().enumerate() {
                 if i.1 .1 == self.user_id {
