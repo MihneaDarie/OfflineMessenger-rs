@@ -1,6 +1,6 @@
 mod cli;
 use cli::ClientManager;
-use common::{ServerDetails, IP};
+use common::IP;
 
 
 #[tokio::main]

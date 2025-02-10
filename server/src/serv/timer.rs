@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{
     sync::{mpsc::Sender, Mutex},
-    task::{spawn, JoinHandle},
+    task::spawn,
     time::sleep,
 };
 
@@ -62,7 +62,7 @@ impl Timer {
                 for ((sender, receiver), values) in messages.iter() {
                     if let Some(client_id) = users
                         .iter()
-                        .find(|(user_id, _, _)| user_id == sender)
+                        .find(|(user_id, _, _)| user_id == receiver)
                         .map(|(_, client, _)| *client)
                     {
                         if let Some(send) = channels.get(&client_id) {
@@ -75,7 +75,7 @@ impl Timer {
                                 let content_owned = content.clone();
                                 let rep_copied = rep.clone();
                                 
-                                let new_mes: String = conn
+                                let new_mes = conn
                                     .call(move |conn| {
                                         let mut mes = mes_cloned;
                                         if let Some(reply_to) = rep_copied {

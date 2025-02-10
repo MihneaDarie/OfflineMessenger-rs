@@ -110,13 +110,12 @@ impl ServerManager {
                 {
                     comm.insert(addr.port(), producer);
                 }
+                let mut buffer = [0u8; 1024];
 
                 let command_manager = self.command_manager.clone();
                 tokio::spawn(async move {
-                    let mut buffer = [0u8; 1024];
                     loop {
                         tokio::select! {
-                            
                             msg = receiver.recv() => {
                                 if let Some(msg) = msg {
                                     writer.lock().await.write_all(msg.as_bytes()).await.unwrap();
@@ -146,7 +145,6 @@ impl ServerManager {
                         }
                     }
                 });
-                
             }
             let guard = self.cvar.lock().await;
             {

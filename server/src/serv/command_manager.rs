@@ -115,6 +115,7 @@ impl CommandManager {
             println!("{}", self.answer);
             return;
         }
+
         {
             let users = self.online_users.lock().await;
             if users.iter().any(|(_, client, _)| *client == self.user_id) {
@@ -123,6 +124,7 @@ impl CommandManager {
                 return;
             }
         }
+        
         let username = self.arguments[0].clone();
         let password = self.arguments[1].clone();
         let conn_clone = {
@@ -410,8 +412,8 @@ impl CommandManager {
         let db_conn = self.data_base.clone();
         let conn = db_conn.lock().await;
         let unprocessed = {
-            let mut guard = self.unprocessed_messages.lock().await;
-            std::mem::take(&mut *guard)
+            let guard = self.unprocessed_messages.lock().await;
+            guard.clone()
         };
         let answer_str: String = conn.call(move |conn| {
             let mut m = unprocessed;
@@ -463,8 +465,8 @@ impl CommandManager {
         let db_conn = self.data_base.clone();
         let conn = db_conn.lock().await;
         let users_copy = {
-            let mut guard = self.online_users.lock().await;
-            std::mem::take(&mut *guard)
+            let guard = self.online_users.lock().await;
+            guard.clone()
         };
         let user_id = self.user_id;
         let chat: String = conn.call(move |conn| {
